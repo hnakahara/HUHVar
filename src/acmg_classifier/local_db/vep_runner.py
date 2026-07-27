@@ -228,15 +228,30 @@ def _parse_vep_record(
     # GRCh37 has no VEP mane_select flag — recover it by accession before sorting.
     _apply_mane_fallback(consequences, mane_map)
 
+    # Per-gene most-severe consequence rank. This is the TOP sort key so the gene
+    # whose transcript actually overlaps the variant wins across genes, BEFORE the
+    # MANE/canonical transcript attributes. Without it, a variant sitting in one
+    # gene's coding region but within VEP's default 5 kb of a *neighbouring* gene
+    # (e.g. MUTYH/HPDL, PTEN/KLLN, PMS2/RSPH10B/AIMP2) could pick the neighbour's
+    # MANE+canonical transcript — a mere upstream/downstream call — over the target
+    # gene's coding transcript, because is_mane_select/canonical outranked severity.
+    gene_best: dict[str, int] = {}
+    for c in consequences:
+        idx = _SEVERITY_INDEX.get(c.consequence, 999)
+        if idx < gene_best.get(c.gene_symbol, 999):
+            gene_best[c.gene_symbol] = idx
+
     # Pre-sort so AnnotationData.primary_consequence (which picks the first
     # match) sees the clinically-preferred transcript first:
-    #   1. MANE Select before non-MANE
-    #   2. RefSeq (NM_) before Ensembl (ENST) when MANE-tied
-    #   3. Canonical before non-canonical
+    #   0. Gene with the most-severe consequence (keeps the overlapping gene)
+    #   1. MANE Select before non-MANE          } transcript choice WITHIN that gene
+    #   2. RefSeq (NM_) before Ensembl (ENST)    }
+    #   3. Canonical before non-canonical        }
     #   4. Most-severe consequence within the same rank
     # Using `not` on the booleans inverts True→False so True (preferred)
     # sorts ahead under Python's ascending sort.
     consequences.sort(key=lambda c: (
+        gene_best.get(c.gene_symbol, 999),
         not c.is_mane_select,
         not c.transcript_id.startswith("NM_"),
         not c.is_canonical,
